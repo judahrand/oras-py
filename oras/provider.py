@@ -3,6 +3,7 @@ __copyright__ = "Copyright The ORAS Authors."
 __license__ = "Apache-2.0"
 
 import copy
+import hashlib
 import os
 import sys
 import urllib
@@ -965,6 +966,46 @@ class Registry:
         if validation_schema:
             jsonschema.validate(manifest, schema=validation_schema)
         return manifest
+
+    @decorator.ensure_container
+    def resolve_digest(
+        self,
+        container: container_type,
+        allowed_media_type: Optional[List[str]] = None,
+    ) -> str:
+        """
+        Resolve a manifest reference to its digest.
+
+        :param container: parsed container URI
+        :type container: oras.container.Container or str
+        :return: canonical manifest digest, including the algorithm prefix
+        :param allowed_media_type: one or more allowed media types
+        :type allowed_media_type: list or None
+        :rtype: str
+        """
+        # Load authentication configs for the container's registry
+        # This ensures credentials are available for authenticated registries
+        self.auth.load_configs(container)
+
+        if not allowed_media_type:
+            allowed_media_type = oras.defaults.default_manifest_accepted_media_types
+        headers = {"Accept": ", ".join(allowed_media_type)}
+        manifest_url = f"{self.prefix}://{container.manifest_url()}"  # type: ignore
+
+        response = self.do_request(manifest_url, "HEAD", headers=headers)
+        if response.status_code not in [405, 501]:
+            self._check_200_response(response)
+            digest = response.headers.get("Docker-Content-Digest")
+            if digest:
+                return digest
+
+        # Older registries may not support HEAD or provide a digest header.
+        response = self.do_request(manifest_url, "GET", headers=headers)
+        self._check_200_response(response)
+        digest = response.headers.get("Docker-Content-Digest")
+        if digest:
+            return digest
+        return f"sha256:{hashlib.sha256(response.content).hexdigest()}"
 
     @decorator.retry()
     def do_request(

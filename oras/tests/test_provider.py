@@ -35,6 +35,16 @@ def test_annotated_registry_push(tmp_path, registry, credentials, target):
     res = client.push(files=[artifact], target=target, manifest_annotations=annots)
     assert res.status_code in [200, 201]
 
+    digest = res.headers["Docker-Content-Digest"]
+    assert remote.resolve_digest(target) == digest
+    assert (
+        remote.resolve_digest(
+            target,
+            allowed_media_type=[oras.defaults.default_manifest_media_type],
+        )
+        == digest
+    )
+
     # Get the manifest
     manifest = remote.get_manifest(target)
     assert "annotations" in manifest
