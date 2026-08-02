@@ -16,7 +16,7 @@ import sys
 import tarfile
 import tempfile
 from contextlib import contextmanager
-from typing import Generator, Optional, TextIO, Union
+from typing import Generator, Iterator, Optional, TextIO, Union
 
 
 class PathAndOptionalContent:
@@ -33,24 +33,46 @@ def reset(tarinfo):
     return tarinfo
 
 
-def make_targz(source_dir: str, dest_name: Optional[str] = None) -> str:
-    """
-    Make a reproducible (no mtime) targz (compressed) archive from a source directory.
-    """
-    dest_name = dest_name or get_tmpfile(suffix=".tar.gz")
+@contextmanager
+def temporary_file(suffix: str = "") -> Iterator[str]:
+    """Yield a closed temporary file path and remove it on exit."""
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp_file:
+        tmp_path = tmp_file.name
 
-    # os.O_WRONLY tells the computer you are only going to writo to the file, not read
-    # os.O_CREATE tells the computer to create the file if it doesn't exist
-    with os.fdopen(
-        os.open(dest_name, os.O_WRONLY | os.O_CREAT, 0o644), "wb"
-    ) as out_file:
-        with gzip.GzipFile(mode="wb", fileobj=out_file, mtime=0) as gzip_file:
+    try:
+        yield tmp_path
+    finally:
+        try:
+            os.remove(tmp_path)
+        except FileNotFoundError:
+            pass
+
+
+def make_targz(source_dir: str, dest_name: Optional[str] = None) -> str:
+    if dest_name is None:
+        fd, dest_name = tempfile.mkstemp(suffix=".tar.gz")
+        os.close(fd)
+
+    with open(dest_name, "wb") as out_file:
+        with gzip.GzipFile(
+            filename="", mode="wb", fileobj=out_file, mtime=0
+        ) as gzip_file:
             with tarfile.open(fileobj=gzip_file, mode="w:") as tar_file:
                 tar_file.add(
                     source_dir, filter=reset, arcname=os.path.basename(source_dir)
                 )
 
     return dest_name
+
+
+@contextmanager
+def make_tmp_targz(source_dir: str) -> Iterator[str]:
+    """
+    Make a reproducible (no mtime) targz (compressed) archive from a source directory.
+    """
+    with temporary_file(suffix=".tar.gz") as out_path:
+        out_path = make_targz(source_dir, out_path)
+        yield out_path
 
 
 def sanitize_path(expected_dir, path):
@@ -154,56 +176,6 @@ def mkdir_p(path: str):
             pass
         else:
             raise ValueError(f"Error creating path {path}.")
-
-
-def get_tmpfile(
-    tmpdir: Optional[str] = None, prefix: str = "", suffix: str = ""
-) -> str:
-    """
-    Get a temporary file with an optional prefix.
-
-    :param tmpdir : an optional temporary directory
-    :type tmpdir: str
-    :param prefix: an optional prefix for the temporary path
-    :type prefix: str
-    :param suffix: an optional suffix (extension)
-    :type suffix: str
-    """
-    # First priority for the base goes to the user requested.
-    tmpdir = get_tmpdir(tmpdir)
-
-    # If tmpdir is set, add to prefix
-    if tmpdir:
-        prefix = os.path.join(tmpdir, os.path.basename(prefix))
-
-    fd, tmp_file = tempfile.mkstemp(prefix=prefix, suffix=suffix)
-    os.close(fd)
-
-    return tmp_file
-
-
-def get_tmpdir(
-    tmpdir: Optional[str] = None, prefix: Optional[str] = "", create: bool = True
-) -> str:
-    """
-    Get a temporary directory for an operation.
-
-    :param tmpdir: an optional temporary directory
-    :type tmpdir: str
-    :param prefix: an optional prefix for the temporary path
-    :type prefix: str
-    :param create: create the directory
-    :type create: bool
-    """
-    tmpdir = tmpdir or tempfile.gettempdir()
-    prefix = prefix or "oras-tmp"
-    prefix = "%s.%s" % (prefix, next(tempfile._get_candidate_names()))  # type: ignore
-    tmpdir = os.path.join(tmpdir, prefix)
-
-    if not os.path.exists(tmpdir) and create is True:
-        os.mkdir(tmpdir)
-
-    return tmpdir
 
 
 def recursive_find(base: str, pattern: Optional[str] = None) -> Generator:

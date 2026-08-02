@@ -402,30 +402,29 @@ class Registry(oras.provider.Registry):
             blob_name = item.get("title") or os.path.basename(blob)
 
             # If it's a directory, we need to compress
-            cleanup_blob = False
-            if os.path.isdir(blob):
-                blob = oras.utils.make_targz(blob)
-                cleanup_blob = True
+            is_dir = os.path.isdir(blob)
+            archive_ctx = (
+                oras.utils.make_tmp_targz(blob)
+                if os.path.isdir(blob)
+                else nullcontext(blob)
+            )
+            with archive_ctx as blob:
+                # Create a new layer from the blob
+                layer = oras.oci.NewLayer(blob, media_type, is_dir=cleanup_blob)
+                logger.debug(f"Preparing layer {layer}")
 
-            # Create a new layer from the blob
-            layer = oras.oci.NewLayer(blob, media_type, is_dir=cleanup_blob)
-            logger.debug(f"Preparing layer {layer}")
+                # Update annotations with title we will need for extraction
+                annots.update({oras.defaults.annotation_title: blob_name})
+                layer["annotations"] = annots
 
-            # Update annotations with title we will need for extraction
-            annots.update({oras.defaults.annotation_title: blob_name})
-            layer["annotations"] = annots
+                # update the manifest with the new layer
+                manifest["layers"].append(layer)
 
-            # update the manifest with the new layer
-            manifest["layers"].append(layer)
+                # Upload the blob layer
+                logger.info(f"Uploading {blob} to {container.uri}")
+                response = self.upload_blob(blob, container, layer)
+                self._check_200_response(response)
 
-            # Upload the blob layer
-            logger.info(f"Uploading {blob} to {container.uri}")
-            response = self.upload_blob(blob, container, layer)
-            self._check_200_response(response)
-
-            # Do we need to cleanup a temporary targz?
-            if cleanup_blob and os.path.exists(blob):
-                os.remove(blob)
 
         # Prepare manifest and config (add your custom annotations here)
         manifest["annotations"] = {}

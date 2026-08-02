@@ -5,7 +5,6 @@ __license__ = "Apache-2.0"
 import json
 import os
 import pathlib
-import shutil
 
 import pytest
 
@@ -71,24 +70,6 @@ def test_copyfile(tmp_path):
     assert os.path.exists(dest)
 
 
-def test_get_tmpdir_tmpfile():
-    print("Testing utils.get_tmpdir, get_tmpfile")
-
-    tmpdir = utils.get_tmpdir()
-    assert os.path.exists(tmpdir)
-    assert os.path.basename(tmpdir).startswith("oras")
-    shutil.rmtree(tmpdir)
-    tmpdir = utils.get_tmpdir(prefix="name")
-    assert os.path.basename(tmpdir).startswith("name")
-    shutil.rmtree(tmpdir)
-    tmpfile = utils.get_tmpfile()
-    assert "oras" in tmpfile
-    os.remove(tmpfile)
-    tmpfile = utils.get_tmpfile(prefix="pancakes")
-    assert "pancakes" in tmpfile
-    os.remove(tmpfile)
-
-
 def test_mkdir_p(tmp_path):
     print("Testing utils.mkdir_p")
 
@@ -132,17 +113,33 @@ def test_split_path_and_content():
     assert not path_content.content
 
 
-def test_make_targz_files_with_same_content_generates_same_hash(tmp_path):
+def test_make_tmp_targz_files_with_same_content_generates_same_hash(tmp_path):
     tmp_file = str(tmp_path / "written_file.txt")
     utils.write_file(tmp_file, "hello!")
 
-    tmp_tar_1 = str(tmp_path / "test1.tar.gz")
-    utils.make_targz(tmp_file, tmp_tar_1)
-
-    tmp_tar_2 = str(tmp_path / "test2.tar.gz")
-    utils.make_targz(tmp_file, tmp_tar_2)
-
-    hash_tar_1 = utils.get_file_hash(tmp_tar_1)
-    hash_tar_2 = utils.get_file_hash(tmp_tar_2)
+    with utils.make_tmp_targz(tmp_file) as tmp_tar_1:
+        with utils.make_tmp_targz(tmp_file) as tmp_tar_2:
+            hash_tar_1 = utils.get_file_hash(tmp_tar_1)
+            hash_tar_2 = utils.get_file_hash(tmp_tar_2)
 
     assert hash_tar_1 == hash_tar_2
+
+
+def test_make_targz_returns_persistent_archive(tmp_path):
+    source = str(tmp_path / "written_file.txt")
+    utils.write_file(source, "hello!")
+
+    archive = utils.make_targz(source)
+
+    try:
+        assert os.path.exists(archive)
+    finally:
+        os.remove(archive)
+
+
+def test_temporary_file_is_reopenable_and_removed():
+    with utils.temporary_file(suffix=".txt") as tmp_file:
+        utils.write_file(tmp_file, "hello!")
+        assert utils.read_file(tmp_file) == "hello!"
+
+    assert not os.path.exists(tmp_file)

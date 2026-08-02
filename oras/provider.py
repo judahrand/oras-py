@@ -5,11 +5,11 @@ __license__ = "Apache-2.0"
 import copy
 import os
 import sys
+import tempfile
 import urllib
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
 from http.cookiejar import DefaultCookiePolicy
-from tempfile import TemporaryDirectory
 from typing import Callable, Generator, List, Optional, Tuple, Union
 
 import jsonschema
@@ -30,8 +30,7 @@ from oras.utils.fileio import PathAndOptionalContent
 
 @contextmanager
 def temporary_empty_config() -> Generator[str, None, None]:
-    with TemporaryDirectory() as tmpdir:
-        config_file = oras.utils.get_tmpfile(tmpdir=tmpdir, suffix=".json")
+    with oras.utils.temporary_file(suffix=".json") as config_file:
         oras.utils.write_file(config_file, "{}")
         yield config_file
 
@@ -786,39 +785,37 @@ class Registry:
             blob_name = os.path.basename(blob)
 
             # If it's a directory, we need to compress
-            cleanup_blob = False
-            if os.path.isdir(blob):
-                blob = oras.utils.make_targz(blob)
-                cleanup_blob = True
-
-            # Create a new layer from the blob
-            layer = oras.oci.NewLayer(blob, is_dir=cleanup_blob, media_type=media_type)
-            annotations = annotset.get_annotations(blob)
-
-            # Always strip blob_name of path separator
-            layer["annotations"] = {
-                oras.defaults.annotation_title: blob_name.strip(os.sep)
-            }
-            if annotations:
-                layer["annotations"].update(annotations)
-
-            # update the manifest with the new layer
-            manifest["layers"].append(layer)
-            logger.debug(f"Preparing layer {layer}")
-
-            # Upload the blob layer
-            response = self.upload_blob(
-                blob,
-                container,
-                layer,
-                do_chunked=do_chunked,
-                chunk_size=chunk_size,
+            is_dir = os.path.isdir(blob)
+            archive_ctx = (
+                oras.utils.make_tmp_targz(blob)
+                if os.path.isdir(blob)
+                else nullcontext(blob)
             )
-            self._check_200_response(response)
+            with archive_ctx as blob:
+                # Create a new layer from the blob
+                layer = oras.oci.NewLayer(blob, is_dir=is_dir, media_type=media_type)
+                annotations = annotset.get_annotations(blob)
 
-            # Do we need to cleanup a temporary targz?
-            if cleanup_blob and os.path.exists(blob):
-                os.remove(blob)
+                # Always strip blob_name of path separator
+                layer["annotations"] = {
+                    oras.defaults.annotation_title: blob_name.strip(os.sep)
+                }
+                if annotations:
+                    layer["annotations"].update(annotations)
+
+                # update the manifest with the new layer
+                manifest["layers"].append(layer)
+                logger.debug(f"Preparing layer {layer}")
+
+                # Upload the blob layer
+                response = self.upload_blob(
+                    blob,
+                    container,
+                    layer,
+                    do_chunked=do_chunked,
+                    chunk_size=chunk_size,
+                )
+                self._check_200_response(response)
 
         # Add annotations to the manifest, if provided
         manifest_annots = annotset.get_annotations("$manifest") or {}
@@ -895,8 +892,7 @@ class Registry:
             container, configs=[config_path] if config_path else None
         )
         manifest = self.get_manifest(container, allowed_media_type)
-        outdir = outdir or oras.utils.get_tmpdir()
-        overwrite = overwrite
+        outdir = outdir or tempfile.mkdtemp()
 
         files = []
         for layer in manifest.get("layers", []):
@@ -919,11 +915,11 @@ class Registry:
 
             # A directory will need to be uncompressed and moved
             if layer["mediaType"] == oras.defaults.default_blob_dir_media_type:
-                targz = oras.utils.get_tmpfile(suffix=".tar.gz")
-                self.download_blob(container, layer["digest"], targz)
+                with oras.utils.temporary_file(suffix=".tar.gz") as tmp_file:
+                    self.download_blob(container, layer["digest"], tmp_file)
 
-                # The artifact will be extracted to the correct name
-                oras.utils.extract_targz(targz, os.path.dirname(outfile))
+                    # The artifact will be extracted to the correct name
+                    oras.utils.extract_targz(tmp_file, os.path.dirname(outfile))
 
             # Anything else just extracted directly
             else:

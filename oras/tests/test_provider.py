@@ -17,6 +17,13 @@ import oras.utils
 here = Path(__file__).resolve().parent
 
 
+def test_temporary_empty_config_is_reopenable_and_removed():
+    with oras.provider.temporary_empty_config() as config_file:
+        assert oras.utils.read_file(config_file) == "{}"
+
+    assert not os.path.exists(config_file)
+
+
 @pytest.mark.with_auth(False)
 def test_annotated_registry_push(tmp_path, registry, credentials, target):
     """
