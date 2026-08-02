@@ -3,14 +3,18 @@ __copyright__ = "Copyright The ORAS Authors."
 __license__ = "Apache-2.0"
 
 import copy
+import enum
+import hashlib
+import hmac
 import os
+import re
 import sys
 import urllib
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
 from http.cookiejar import DefaultCookiePolicy
 from tempfile import TemporaryDirectory
-from typing import Callable, Generator, List, Optional, Tuple, Union
+from typing import Any, Callable, Generator, List, Optional, Tuple, Union
 
 import jsonschema
 import requests
@@ -26,6 +30,87 @@ import oras.utils
 from oras.logger import logger
 from oras.types import container_type
 from oras.utils.fileio import PathAndOptionalContent
+
+_DIGEST_PATTERN = re.compile(
+    r"^(?P<algorithm>[a-z0-9]+(?:[+._-][a-z0-9]+)*):" r"(?P<encoded>[a-zA-Z0-9=_-]+)$"
+)
+
+
+class RegisteredDigestAlgorithm(str, enum.Enum):
+    SHA256 = "sha256"
+    SHA512 = "sha512"
+
+    def hasher(self) -> Any:
+        try:
+            return hashlib.new(self.value)
+        except ValueError as error:
+            raise ValueError(f"Unsupported OCI digest algorithm: {self}.") from error
+
+
+def _parse_digest(digest: str) -> Tuple[RegisteredDigestAlgorithm, str]:
+    """Parse and validate an OCI digest's algorithm and encoded value."""
+    if not isinstance(digest, str):
+        raise ValueError(f"Invalid OCI digest: {digest!r}.")
+
+    match = _DIGEST_PATTERN.fullmatch(digest)
+    if not match:
+        raise ValueError(f"Invalid OCI digest: {digest!r}.")
+
+    algorithm = match.group("algorithm")
+    try:
+        registered_algorithm = RegisteredDigestAlgorithm(algorithm)
+    except ValueError as error:
+        raise ValueError(f"Unsupported OCI digest algorithm: {algorithm}.") from error
+    encoded = match.group("encoded")
+    encoded_length = registered_algorithm.hasher().digest_size * 2
+    if encoded_length is None:
+        raise ValueError(f"Unsupported OCI digest algorithm: {algorithm}.")
+
+    if not re.fullmatch(f"[a-f0-9]{{{encoded_length}}}", encoded):
+        raise ValueError(
+            f"Invalid {algorithm} digest encoding: expected {encoded_length} "
+            "lowercase hexadecimal characters."
+        )
+
+    return registered_algorithm, encoded
+
+
+class Digest:
+    def __init__(self, digest: str) -> None:
+        self.algorithm, self.encoded = _parse_digest(digest)
+
+    @property
+    def digest(self) -> str:
+        return f"{self.algorithm.value}:{self.encoded}"
+
+    def __str__(self) -> str:
+        return self.digest
+
+
+def _validate_downloaded_blob(
+    path: str,
+    digest: Digest,
+    expected_size: int,
+) -> None:
+    """Validate a downloaded blob's descriptor size and digest."""
+    actual_size = os.path.getsize(path)
+    if actual_size != expected_size:
+        raise ValueError(
+            f"Downloaded blob size mismatch for {digest}: expected "
+            f"{expected_size} bytes, got {actual_size} bytes."
+        )
+
+    hasher = digest.algorithm.hasher()
+    with open(path, "rb") as blob:
+        for chunk in iter(lambda: blob.read(8192), b""):
+            hasher.update(chunk)
+
+    actual_encoded = hasher.hexdigest()
+    if not hmac.compare_digest(actual_encoded, digest.encoded):
+        raise ValueError(
+            f"Downloaded blob digest mismatch: expected {digest}, got "
+            f"{digest.algorithm.value}:{actual_encoded}."
+        )
 
 
 @contextmanager
@@ -889,6 +974,7 @@ class Registry:
         :type outdir: str
         :param target: target location to pull from
         :type target: str
+        :raises ValueError: if a layer descriptor or downloaded layer is invalid
         """
         container = self.get_container(target)
         self.auth.load_configs(
@@ -896,7 +982,6 @@ class Registry:
         )
         manifest = self.get_manifest(container, allowed_media_type)
         outdir = outdir or oras.utils.get_tmpdir()
-        overwrite = overwrite
 
         files = []
         for layer in manifest.get("layers", []):
@@ -917,17 +1002,40 @@ class Registry:
                 )
                 continue
 
-            # A directory will need to be uncompressed and moved
-            if layer["mediaType"] == oras.defaults.default_blob_dir_media_type:
-                targz = oras.utils.get_tmpfile(suffix=".tar.gz")
-                self.download_blob(container, layer["digest"], targz)
+            digest = Digest(layer["digest"])
+            expected_size = layer["size"]
+            if (
+                not isinstance(expected_size, int)
+                or isinstance(expected_size, bool)
+                or expected_size < 0
+            ):
+                raise ValueError(
+                    f"Invalid OCI descriptor size for {digest.digest}: {expected_size!r}."
+                )
 
-                # The artifact will be extracted to the correct name
-                oras.utils.extract_targz(targz, os.path.dirname(outfile))
+            outfile_dir = os.path.dirname(outfile)
+            if outfile_dir and not os.path.exists(outfile_dir):
+                oras.utils.mkdir_p(outfile_dir)
 
-            # Anything else just extracted directly
-            else:
-                self.download_blob(container, layer["digest"], outfile)
+            # Keep downloaded content private until its descriptor is verified.
+            with TemporaryDirectory(prefix=".oras-", dir=outfile_dir) as tmpdir:
+                is_directory = (
+                    layer["mediaType"] == oras.defaults.default_blob_dir_media_type
+                )
+                staged = os.path.join(tmpdir, "blob.tar.gz" if is_directory else "blob")
+                self.download_blob(container, digest.digest, staged)
+                _validate_downloaded_blob(
+                    staged,
+                    digest,
+                    expected_size,
+                )
+
+                # A verified directory archive can now be safely consumed.
+                if is_directory:
+                    oras.utils.extract_targz(staged, outfile_dir)
+                else:
+                    os.replace(staged, outfile)
+
             logger.info(f"Successfully pulled {outfile}.")
             files.append(outfile)
         return files

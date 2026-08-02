@@ -2,6 +2,7 @@ __author__ = "Vanessa Sochat"
 __copyright__ = "Copyright The ORAS Authors."
 __license__ = "Apache-2.0"
 
+import hashlib
 import os
 import subprocess
 from pathlib import Path
@@ -15,6 +16,147 @@ import oras.provider
 import oras.utils
 
 here = Path(__file__).resolve().parent
+
+
+def make_pull_client(monkeypatch, layer, content):
+    """Create a registry client whose pull inputs do not require a live registry."""
+    client = oras.provider.Registry(insecure=True)
+    monkeypatch.setattr(client, "get_container", lambda target: target)
+    monkeypatch.setattr(client.auth, "load_configs", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        client,
+        "get_manifest",
+        lambda container, allowed_media_type: {"layers": [layer]},
+    )
+
+    def download_blob(container, digest, outfile):
+        Path(outfile).write_bytes(content)
+        return outfile
+
+    monkeypatch.setattr(client, "download_blob", download_blob)
+    return client
+
+
+def test_digest_string_round_trip():
+    original = f"sha256:{hashlib.sha256(b'content').hexdigest()}"
+
+    assert str(oras.provider.Digest(original)) == original
+
+
+@pytest.mark.parametrize("algorithm", ["sha256", "sha512"])
+def test_pull_validates_registered_digest(monkeypatch, tmp_path, algorithm):
+    content = b"verified content"
+    digest = f"{algorithm}:{hashlib.new(algorithm, content).hexdigest()}"
+    layer = {
+        "mediaType": oras.defaults.default_blob_media_type,
+        "size": len(content),
+        "digest": digest,
+        "annotations": {oras.defaults.annotation_title: "artifact.txt"},
+    }
+    client = make_pull_client(monkeypatch, layer, content)
+
+    files = client.pull("registry.example/repository:tag", outdir=str(tmp_path))
+
+    outfile = tmp_path / "artifact.txt"
+    assert files == [str(outfile)]
+    assert outfile.read_bytes() == content
+
+
+def test_pull_rejects_digest_mismatch_without_replacing_file(monkeypatch, tmp_path):
+    expected_content = b"expected content"
+    downloaded_content = b"corrupt! content"
+    digest = f"sha256:{hashlib.sha256(expected_content).hexdigest()}"
+    layer = {
+        "mediaType": oras.defaults.default_blob_media_type,
+        "size": len(downloaded_content),
+        "digest": digest,
+        "annotations": {oras.defaults.annotation_title: "artifact.txt"},
+    }
+    client = make_pull_client(monkeypatch, layer, downloaded_content)
+    outfile = tmp_path / "artifact.txt"
+    outfile.write_bytes(b"existing content")
+
+    with pytest.raises(ValueError) as error:
+        client.pull("registry.example/repository:tag", outdir=str(tmp_path))
+
+    actual_digest = f"sha256:{hashlib.sha256(downloaded_content).hexdigest()}"
+    assert str(error.value) == (
+        f"Downloaded blob digest mismatch: expected {digest}, got {actual_digest}."
+    )
+    assert outfile.read_bytes() == b"existing content"
+    assert not list(tmp_path.glob(".oras-*"))
+
+
+def test_pull_rejects_size_mismatch(monkeypatch, tmp_path):
+    content = b"content"
+    digest = f"sha256:{hashlib.sha256(content).hexdigest()}"
+    layer = {
+        "mediaType": oras.defaults.default_blob_media_type,
+        "size": len(content) + 1,
+        "digest": digest,
+        "annotations": {oras.defaults.annotation_title: "artifact.txt"},
+    }
+    client = make_pull_client(monkeypatch, layer, content)
+
+    with pytest.raises(ValueError, match="Downloaded blob size mismatch"):
+        client.pull("registry.example/repository:tag", outdir=str(tmp_path))
+
+    assert not (tmp_path / "artifact.txt").exists()
+    assert not list(tmp_path.glob(".oras-*"))
+
+
+def test_pull_validates_directory_before_extraction(monkeypatch, tmp_path):
+    expected_content = b"expected archive"
+    downloaded_content = b"corrupted archive"
+    digest = f"sha256:{hashlib.sha256(expected_content).hexdigest()}"
+    layer = {
+        "mediaType": oras.defaults.default_blob_dir_media_type,
+        "size": len(downloaded_content),
+        "digest": digest,
+        "annotations": {oras.defaults.annotation_title: "artifact"},
+    }
+    client = make_pull_client(monkeypatch, layer, downloaded_content)
+    extracted = False
+
+    def extract_targz(*args, **kwargs):
+        nonlocal extracted
+        extracted = True
+
+    monkeypatch.setattr(oras.utils, "extract_targz", extract_targz)
+
+    with pytest.raises(ValueError, match="Downloaded blob digest mismatch"):
+        client.pull("registry.example/repository:tag", outdir=str(tmp_path))
+
+    assert not extracted
+    assert not (tmp_path / "artifact").exists()
+    assert not list(tmp_path.glob(".oras-*"))
+
+
+@pytest.mark.parametrize(
+    ("digest", "error"),
+    [
+        ("sha256+b64u:YWJj", "Unsupported OCI digest algorithm"),
+        (f"sha384:{'a' * 96}", "Unsupported OCI digest algorithm"),
+        (f"sha256:{'A' * 64}", "Invalid sha256 digest encoding"),
+        (f"sha256:{'a' * 63}", "Invalid sha256 digest encoding"),
+        ("sha256:not!hex", "Invalid OCI digest"),
+        ("sha256:", "Invalid OCI digest"),
+        (f"SHA256:{'a' * 64}", "Invalid OCI digest"),
+    ],
+)
+def test_pull_rejects_invalid_digest_encoding(monkeypatch, tmp_path, digest, error):
+    layer = {
+        "mediaType": oras.defaults.default_blob_media_type,
+        "size": 0,
+        "digest": digest,
+        "annotations": {oras.defaults.annotation_title: "artifact.txt"},
+    }
+    client = make_pull_client(monkeypatch, layer, b"")
+
+    with pytest.raises(ValueError, match=error):
+        client.pull("registry.example/repository:tag", outdir=str(tmp_path))
+
+    assert not (tmp_path / "artifact.txt").exists()
 
 
 @pytest.mark.with_auth(False)
