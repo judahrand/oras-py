@@ -2,9 +2,11 @@ __author__ = "Vanessa Sochat"
 __copyright__ = "Copyright The ORAS Authors."
 __license__ = "Apache-2.0"
 
+import hashlib
 import os
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -71,6 +73,90 @@ def test_annotated_registry_push(tmp_path, registry, credentials, target):
         res = client.push(
             files=[artifact], target=target, annotation_file=annotation_file
         )
+
+
+def test_resolve_digest_uses_digest_from_head(monkeypatch):
+    remote = oras.provider.Registry(hostname="registry.example", insecure=True)
+    target = "registry.example/example/artifact:v1"
+    digest = "sha256:resolved-from-head"
+    calls = []
+
+    def do_request(url, method, headers):
+        calls.append((url, method, headers))
+        return SimpleNamespace(
+            status_code=200,
+            headers={"Docker-Content-Digest": digest},
+            content=b"",
+        )
+
+    monkeypatch.setattr(remote, "do_request", do_request)
+    monkeypatch.setattr(remote.auth, "load_configs", lambda container: None)
+
+    assert remote.resolve_digest(target) == digest
+
+    manifest_url = "http://registry.example/v2/example/artifact/manifests/v1"
+    headers = {"Accept": ", ".join(oras.defaults.default_manifest_accepted_media_types)}
+    assert calls == [(manifest_url, "HEAD", headers)]
+
+
+@pytest.mark.parametrize(
+    "head_status",
+    [
+        pytest.param(200, id="missing-digest-header"),
+        pytest.param(405, id="method-not-allowed"),
+        pytest.param(501, id="not-implemented"),
+    ],
+)
+def test_resolve_digest_falls_back_to_get(monkeypatch, head_status):
+    remote = oras.provider.Registry(hostname="registry.example", insecure=True)
+    target = "registry.example/example/artifact:v1"
+    digest = "sha256:resolved-from-get"
+    responses = iter(
+        [
+            SimpleNamespace(status_code=head_status, headers={}, content=b""),
+            SimpleNamespace(
+                status_code=200,
+                headers={"Docker-Content-Digest": digest},
+                content=b"manifest",
+            ),
+        ]
+    )
+    calls = []
+
+    def do_request(url, method, headers):
+        calls.append((url, method, headers))
+        return next(responses)
+
+    monkeypatch.setattr(remote, "do_request", do_request)
+    monkeypatch.setattr(remote.auth, "load_configs", lambda container: None)
+
+    assert remote.resolve_digest(target) == digest
+
+    manifest_url = "http://registry.example/v2/example/artifact/manifests/v1"
+    headers = {"Accept": ", ".join(oras.defaults.default_manifest_accepted_media_types)}
+    assert calls == [
+        (manifest_url, "HEAD", headers),
+        (manifest_url, "GET", headers),
+    ]
+
+
+def test_resolve_digest_calculates_digest_from_manifest(monkeypatch):
+    remote = oras.provider.Registry(hostname="registry.example", insecure=True)
+    manifest = b'{"schemaVersion":2}'
+    responses = iter(
+        [
+            SimpleNamespace(status_code=405, headers={}, content=b""),
+            SimpleNamespace(status_code=200, headers={}, content=manifest),
+        ]
+    )
+
+    monkeypatch.setattr(
+        remote, "do_request", lambda url, method, headers: next(responses)
+    )
+    monkeypatch.setattr(remote.auth, "load_configs", lambda container: None)
+
+    expected = f"sha256:{hashlib.sha256(manifest).hexdigest()}"
+    assert remote.resolve_digest("registry.example/example/artifact:v1") == expected
 
 
 @pytest.mark.with_auth(False)
