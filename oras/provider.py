@@ -540,7 +540,13 @@ class Registry:
             if digest == oras.defaults.blank_hash:
                 return os.devnull
             raise e
-        self._validate_blob(outfile, oras.oci.Digest(digest), size)
+
+        try:
+            self._validate_blob(outfile, oras.oci.Digest(digest), size)
+        except Exception:
+            os.remove(outfile)
+            raise
+
         return outfile
 
     def put_upload(
@@ -916,7 +922,6 @@ class Registry:
         :type outdir: str
         :param target: target location to pull from
         :type target: str
-        :raises ValueError: if a layer descriptor or downloaded layer is invalid
         """
         container = self.get_container(target)
         self.auth.load_configs(
@@ -944,29 +949,17 @@ class Registry:
                 )
                 continue
 
-            digest = layer["digest"]
-            size = layer["size"]
-            if not isinstance(size, int) or isinstance(size, bool) or size < 0:
-                raise ValueError(f"Invalid OCI descriptor size for {digest}: {size!r}.")
+            # A directory will need to be uncompressed and moved
+            if layer["mediaType"] == oras.defaults.default_blob_dir_media_type:
+                targz = oras.utils.get_tmpfile(suffix=".tar.gz")
+                self.download_blob(container, layer["digest"], targz, layer["size"])
 
-            outfile_dir = os.path.dirname(outfile)
-            if outfile_dir and not os.path.exists(outfile_dir):
-                oras.utils.mkdir_p(outfile_dir)
+                # The artifact will be extracted to the correct name
+                oras.utils.extract_targz(targz, os.path.dirname(outfile))
 
-            # Keep downloaded content private until its descriptor is verified.
-            with TemporaryDirectory(prefix=".oras-", dir=outfile_dir) as tmpdir:
-                is_directory = (
-                    layer["mediaType"] == oras.defaults.default_blob_dir_media_type
-                )
-                staged = os.path.join(tmpdir, "blob.tar.gz" if is_directory else "blob")
-                self.download_blob(container, digest, staged, size)
-
-                # A verified directory archive can now be safely consumed.
-                if is_directory:
-                    oras.utils.extract_targz(staged, outfile_dir)
-                else:
-                    os.replace(staged, outfile)
-
+            # Anything else just extracted directly
+            else:
+                self.download_blob(container, layer["digest"], outfile, layer["size"])
             logger.info(f"Successfully pulled {outfile}.")
             files.append(outfile)
         return files
