@@ -191,7 +191,7 @@ class RegisteredDigestAlgorithm(enum.Enum):
     SHA256 = "sha256"
     SHA512 = "sha512"
 
-    def hash_path(self, path: str) -> "Digest":
+    def digest_for_path(self, path: str) -> "Digest":
         hasher = self.hasher()
         with open(path, "rb") as file:
             for chunk in iter(lambda: file.read(8192), b""):

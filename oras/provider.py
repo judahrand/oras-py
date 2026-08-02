@@ -500,7 +500,7 @@ class Registry:
                     f"{size} bytes, got {actual_size} bytes."
                 )
 
-        actual_digest = digest.algorithm.hash_path(path)
+        actual_digest = digest.algorithm.digest_for_path(path)
         if digest != actual_digest:
             raise ValueError(
                 f"Downloaded blob digest mismatch: expected {digest!s}, got "
