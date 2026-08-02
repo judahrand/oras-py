@@ -227,14 +227,12 @@ class Digest:
             raise ValueError(
                 f"Unsupported OCI digest algorithm: {algorithm}."
             ) from error
-        encoded = match.group("encoded")
-        encoded_length = registered_algorithm.hash_size * 2
-        if encoded_length is None:
-            raise ValueError(f"Unsupported OCI digest algorithm: {algorithm}.")
 
-        if len(encoded) == encoded_length:
+        encoded = match.group("encoded")
+        expected_length = registered_algorithm.hash_size * 2
+        if len(encoded) != expected_length:
             raise ValueError(
-                f"Invalid {algorithm} digest encoding: expected {encoded_length} "
+                f"Invalid {algorithm} digest encoding: expected {expected_length} "
                 "lowercase hexadecimal characters."
             )
 

@@ -305,21 +305,25 @@ class Layout:
         # layer blobs
         for layer in manifest_data.get("layers", []):
             layer_digest = layer["digest"]
+            layer_size = layer["size"]
             if not self.blob_exists(layer_digest):
                 provider.download_blob(
                     container,
                     layer_digest,
                     str(self.digest_to_blob_path(layer_digest)),
+                    layer_size,
                 )
                 logger.debug(f"Downloaded layer blob: {layer_digest}")
 
         # config blob
         config_digest = manifest_data.get("config", {}).get("digest")
+        config_size = manifest_data.get("config", {}).get("size")
         if config_digest and not self.blob_exists(config_digest):
             provider.download_blob(
                 container,
                 config_digest,
                 str(self.digest_to_blob_path(config_digest)),
+                config_size,
             )
             logger.debug(f"Downloaded config blob: {config_digest}")
 
