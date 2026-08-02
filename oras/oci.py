@@ -3,17 +3,24 @@ __copyright__ = "Copyright The ORAS Authors."
 __license__ = "Apache-2.0"
 
 import copy
+import enum
 import hashlib
 import json
 import os
+import re
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import jsonschema
 
 import oras.defaults
 import oras.schemas
 import oras.utils
+
+_DIGEST_PATTERN = re.compile(
+    r"^(?P<algorithm>[a-z0-9]+(?:[+._-][a-z0-9]+)*):" r"(?P<encoded>[a-zA-Z0-9=_-]+)$"
+)
+
 
 EmptyManifest = {
     "schemaVersion": 2,
@@ -178,3 +185,69 @@ class Subject:
             digest,
             size,
         )
+
+
+class RegisteredDigestAlgorithm(enum.Enum):
+    SHA256 = "sha256"
+    SHA512 = "sha512"
+
+    def hash_path(self, path: str) -> "Digest":
+        hasher = self.hasher()
+        with open(path, "rb") as file:
+            for chunk in iter(lambda: file.read(8192), b""):
+                hasher.update(chunk)
+        return Digest(f"{self.value}:{hasher.hexdigest()}")
+
+    def hasher(self) -> Any:
+        try:
+            return hashlib.new(self.value)
+        except ValueError as error:
+            raise ValueError(f"Unsupported OCI digest algorithm: {self}.") from error
+
+    @property
+    def hash_size(self) -> int:
+        return self.hasher().digest_size
+
+
+class Digest:
+    def __init__(self, digest: str) -> None:
+        self.algorithm, self.encoded = self._parse_digest(digest)
+
+    @staticmethod
+    def _parse_digest(digest: str) -> Tuple[RegisteredDigestAlgorithm, str]:
+        """Parse and validate an OCI digest's algorithm and encoded value."""
+        match = _DIGEST_PATTERN.fullmatch(digest)
+        if not match:
+            raise ValueError(f"Invalid OCI digest: {digest!r}.")
+
+        algorithm = match.group("algorithm")
+        try:
+            registered_algorithm = RegisteredDigestAlgorithm(algorithm)
+        except ValueError as error:
+            raise ValueError(
+                f"Unsupported OCI digest algorithm: {algorithm}."
+            ) from error
+        encoded = match.group("encoded")
+        encoded_length = registered_algorithm.hash_size * 2
+        if encoded_length is None:
+            raise ValueError(f"Unsupported OCI digest algorithm: {algorithm}.")
+
+        if len(encoded) == encoded_length:
+            raise ValueError(
+                f"Invalid {algorithm} digest encoding: expected {encoded_length} "
+                "lowercase hexadecimal characters."
+            )
+
+        return registered_algorithm, encoded
+
+    @property
+    def digest(self) -> str:
+        return f"{self.algorithm.value}:{self.encoded}"
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, Digest):
+            return self.digest == other.digest
+        return False
+
+    def __str__(self) -> str:
+        return self.digest
