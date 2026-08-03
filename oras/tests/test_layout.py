@@ -2,14 +2,182 @@ __author__ = "Matteo Mortari"
 __copyright__ = "Copyright The ORAS Authors."
 __license__ = "Apache-2.0"
 
+import json
 import pathlib
 
 import pytest
+import requests
 
 import oras.client
+import oras.defaults
+import oras.oci
 import oras.provider
 import oras.utils as utils
 from oras.layout import Layout, NewLayout, NewLayoutFromRegistry
+
+
+def manifest_response(content, digest_header):
+    """Build a successful manifest response with optional digest metadata."""
+    response = requests.Response()
+    response.status_code = 200
+    response._content = content
+    response._content_consumed = True
+    if digest_header is not None:
+        response.headers["Docker-Content-Digest"] = digest_header
+    return response
+
+
+def manifest_bytes():
+    return json.dumps(
+        {
+            "schemaVersion": 2,
+            "mediaType": oras.defaults.default_manifest_media_type,
+            "config": {},
+            "layers": [],
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def index_bytes(sub_digest, sub_size):
+    return json.dumps(
+        {
+            "schemaVersion": 2,
+            "mediaType": oras.defaults.default_index_media_type,
+            "manifests": [
+                {
+                    "mediaType": oras.defaults.default_manifest_media_type,
+                    "digest": sub_digest,
+                    "size": sub_size,
+                }
+            ],
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def make_layout_provider(monkeypatch, responses):
+    provider = oras.provider.Registry(hostname="registry.example", insecure=True)
+    monkeypatch.setattr(provider.auth, "load_configs", lambda *args, **kwargs: None)
+    response_iter = iter(responses)
+    monkeypatch.setattr(
+        provider, "do_request", lambda *args, **kwargs: next(response_iter)
+    )
+    return provider
+
+
+def test_pull_layout_rejects_top_level_manifest_digest_mismatch(monkeypatch, tmp_path):
+    content = manifest_bytes()
+    wrong_digest = oras.oci.RegisteredDigestAlgorithm.SHA256.digest_for_bytes(
+        b"different manifest",
+    ).digest
+    provider = make_layout_provider(
+        monkeypatch, [manifest_response(content, wrong_digest)]
+    )
+    layout_dir = tmp_path / "layout"
+
+    with pytest.raises(ValueError, match="Downloaded manifest digest mismatch"):
+        Layout(str(layout_dir), validate=False).pull_from_registry(
+            provider, "registry.example/repository:tag"
+        )
+
+    assert not (layout_dir / "oci-layout").exists()
+    assert not (layout_dir / "index.json").exists()
+    assert not Layout(str(layout_dir), validate=False).blob_exists(wrong_digest)
+
+
+def test_pull_layout_fails_for_headerless_tag(monkeypatch, tmp_path):
+    content = manifest_bytes()
+    provider = make_layout_provider(monkeypatch, [manifest_response(content, None)])
+    layout_dir = tmp_path / "layout"
+
+    layout = Layout(str(layout_dir), validate=False)
+    with pytest.raises(
+        ValueError, match="Expected to find Docker-Content-Digest header."
+    ):
+        layout.pull_from_registry(provider, "registry.example/repository:tag")
+
+
+def test_pull_layout_rejects_nested_manifest_digest_mismatch(monkeypatch, tmp_path):
+    sub_content = manifest_bytes()
+    correct_sub_digest = oras.oci.RegisteredDigestAlgorithm.SHA256.digest_for_bytes(
+        sub_content
+    ).digest
+    wrong_sub_digest = oras.oci.RegisteredDigestAlgorithm.SHA256.digest_for_bytes(
+        b"different sub-manifest"
+    ).digest
+    top_content = index_bytes(wrong_sub_digest, len(sub_content))
+    top_digest = oras.oci.RegisteredDigestAlgorithm.SHA256.digest_for_bytes(
+        top_content,
+    ).digest
+
+    provider = make_layout_provider(
+        monkeypatch,
+        [
+            manifest_response(top_content, top_digest),
+            manifest_response(sub_content, correct_sub_digest),
+        ],
+    )
+    layout_dir = tmp_path / "layout"
+
+    with pytest.raises(ValueError, match="Downloaded manifest digest mismatch"):
+        Layout(str(layout_dir), validate=False).pull_from_registry(
+            provider, "registry.example/repository:tag"
+        )
+
+    layout = Layout(str(layout_dir), validate=False)
+    assert not layout.blob_exists(wrong_sub_digest)
+    assert not layout.blob_exists(top_digest)
+    assert not (layout_dir / "index.json").exists()
+
+
+def test_pull_layout_rejects_nested_manifest_size_mismatch(monkeypatch, tmp_path):
+    sub_content = manifest_bytes()
+    sub_digest = oras.oci.RegisteredDigestAlgorithm.SHA256.digest_for_bytes(
+        sub_content
+    ).digest
+    top_content = index_bytes(sub_digest, len(sub_content) + 1)
+    top_digest = oras.oci.RegisteredDigestAlgorithm.SHA256.digest_for_bytes(
+        top_content
+    ).digest
+    provider = make_layout_provider(
+        monkeypatch,
+        [
+            manifest_response(top_content, top_digest),
+            manifest_response(sub_content, None),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="Downloaded manifest size mismatch"):
+        Layout(str(tmp_path / "layout"), validate=False).pull_from_registry(
+            provider, "registry.example/repository:tag"
+        )
+
+
+def test_pull_layout_stores_verified_nested_manifest_bytes(monkeypatch, tmp_path):
+    sub_content = manifest_bytes()
+    sub_digest = oras.oci.RegisteredDigestAlgorithm.SHA256.digest_for_bytes(
+        sub_content
+    ).digest
+    top_content = index_bytes(sub_digest, len(sub_content))
+    top_digest = oras.oci.RegisteredDigestAlgorithm.SHA256.digest_for_bytes(
+        top_content
+    ).digest
+    provider = make_layout_provider(
+        monkeypatch,
+        [
+            manifest_response(top_content, top_digest),
+            manifest_response(sub_content, sub_digest),
+        ],
+    )
+    layout_dir = tmp_path / "layout"
+
+    layout = Layout(str(layout_dir), validate=False)
+    layout.pull_from_registry(provider, "registry.example/repository:tag")
+
+    assert layout.digest_to_blob_path(sub_digest).read_bytes() == sub_content
+    assert layout.digest_to_blob_path(top_digest).read_bytes() == top_content
+    assert layout.validate()
 
 
 def test_validate_oci_layout_valid_minimal(tmp_path):

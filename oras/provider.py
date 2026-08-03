@@ -985,22 +985,69 @@ class Registry:
         :param validation_schema: optional json schema to validate the manifest against
         :type validation_schema: dict
         """
-        # Load authentication configs for the container's registry
-        # This ensures credentials are available for authenticated registries
+        response, _ = self._get_manifest_response(
+            container,
+            allowed_media_type=allowed_media_type,
+            expected_digest=container.digest,  # type: ignore
+        )
+        manifest = response.json()
+        if validation_schema:
+            jsonschema.validate(manifest, schema=validation_schema)
+        return manifest
+
+    def _get_manifest_response(
+        self,
+        container: oras.container.Container,
+        allowed_media_type: Optional[list] = None,
+        reference: Optional[str] = None,
+        expected_digest: Optional[str] = None,
+        expected_size: Optional[int] = None,
+    ) -> Tuple[requests.Response, oras.oci.Digest]:
+        """Fetch and verify a manifest before it is parsed or consumed."""
+        # Load authentication configs for the container's registry. This also makes
+        # the helper safe for callers such as the OCI-layout implementation.
         self.auth.load_configs(container)
 
         if not allowed_media_type:
             allowed_media_type = oras.defaults.default_manifest_accepted_media_types
         headers = {"Accept": ", ".join(allowed_media_type)}
 
-        get_manifest = f"{self.prefix}://{container.manifest_url()}"  # type: ignore
+        get_manifest = f"{self.prefix}://{container.manifest_url(reference)}"
         response = self.do_request(get_manifest, "GET", headers=headers)
-
         self._check_200_response(response)
-        manifest = response.json()
-        if validation_schema:
-            jsonschema.validate(manifest, schema=validation_schema)
-        return manifest
+
+        content = response.content
+        if expected_size is not None and len(content) != expected_size:
+            raise ValueError(
+                "Downloaded manifest size mismatch: expected "
+                f"{expected_size} bytes, got {len(content)} bytes."
+            )
+
+        requested_digest = oras.oci.Digest(expected_digest) if expected_digest else None
+        header_value = response.headers.get("Docker-Content-Digest")
+        if not header_value:
+            raise ValueError("Expected to find Docker-Content-Digest header.")
+
+        header_digest = oras.oci.Digest(header_value)
+        # Verify that the digest in the header matches what we received.
+        actual = header_digest.algorithm.digest_for_bytes(content)
+        if header_digest != actual:
+            raise ValueError(
+                f"Downloaded manifest digest mismatch: expected {header_digest!s}, "
+                f"got {actual!s}."
+            )
+
+        # Verify that the data we've received matches what we asked for.
+        if requested_digest:
+            actual = requested_digest.algorithm.digest_for_bytes(content)
+            if requested_digest != actual:
+                raise ValueError(
+                    f"Downloaded manifest digest mismatch: expected {requested_digest!s}, "
+                    f"got {actual!s}."
+                )
+
+        # Prefer the requested digest and fallback to the registry's canonical digest.
+        return response, requested_digest or header_digest
 
     @decorator.retry()
     def do_request(

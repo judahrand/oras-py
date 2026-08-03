@@ -3,6 +3,7 @@ __copyright__ = "Copyright The ORAS Authors."
 __license__ = "Apache-2.0"
 
 import hashlib
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -17,6 +18,11 @@ import oras.provider
 import oras.utils
 
 here = Path(__file__).resolve().parent
+
+MANIFEST_CONTENT = (
+    b'{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json",'
+    b'"config":{},"layers":[]}'
+)
 
 
 def make_pull_client(monkeypatch, layer, content):
@@ -41,10 +47,97 @@ def make_pull_client(monkeypatch, layer, content):
     return client
 
 
+def make_manifest_client(monkeypatch, content, digest_header):
+    """Create a registry client with a fixed manifest response."""
+    client = oras.provider.Registry(hostname="registry.example", insecure=True)
+    monkeypatch.setattr(client.auth, "load_configs", lambda *args, **kwargs: None)
+
+    response = requests.Response()
+    response.status_code = 200
+    response._content = content
+    response._content_consumed = True
+    if digest_header is not None:
+        response.headers["Docker-Content-Digest"] = digest_header
+    monkeypatch.setattr(client, "do_request", lambda *args, **kwargs: response)
+    return client
+
+
 def test_digest_string_round_trip():
     original = f"sha256:{hashlib.sha256(b'content').hexdigest()}"
 
     assert str(oras.oci.Digest(original)) == original
+
+
+def test_get_manifest_verifies_digest_header(monkeypatch):
+    digest = oras.oci.RegisteredDigestAlgorithm.SHA256.digest_for_bytes(
+        MANIFEST_CONTENT
+    )
+    client = make_manifest_client(monkeypatch, MANIFEST_CONTENT, digest.digest)
+
+    manifest = client.get_manifest("registry.example/repository:tag")
+
+    assert manifest == json.loads(MANIFEST_CONTENT)
+
+
+def test_get_manifest_rejects_digest_header_mismatch(monkeypatch):
+    expected_digest = oras.oci.RegisteredDigestAlgorithm.SHA256.digest_for_bytes(
+        b"different content"
+    )
+    client = make_manifest_client(monkeypatch, MANIFEST_CONTENT, expected_digest.digest)
+
+    with pytest.raises(ValueError, match="Downloaded manifest digest mismatch:"):
+        client.get_manifest("registry.example/repository:tag")
+
+
+def test_get_manifest_fails_without_header(monkeypatch):
+    digest = oras.oci.RegisteredDigestAlgorithm.SHA256.digest_for_bytes(
+        MANIFEST_CONTENT
+    )
+    client = make_manifest_client(monkeypatch, MANIFEST_CONTENT, None)
+
+    with pytest.raises(
+        ValueError, match="Expected to find Docker-Content-Digest header."
+    ):
+        client.get_manifest(f"registry.example/repository@{digest}")
+
+
+def test_get_manifest_rejects_digest_reference_mismatch(monkeypatch):
+    actual_digest = oras.oci.RegisteredDigestAlgorithm.SHA256.digest_for_bytes(
+        MANIFEST_CONTENT
+    ).digest
+    expected_digest = oras.oci.RegisteredDigestAlgorithm.SHA256.digest_for_bytes(
+        b"different content"
+    ).digest
+    client = make_manifest_client(monkeypatch, MANIFEST_CONTENT, actual_digest)
+
+    with pytest.raises(ValueError, match="Downloaded manifest digest mismatch"):
+        client.get_manifest(f"registry.example/repository@{expected_digest}")
+
+
+def test_get_manifest_verifies_reference_and_canonical_header(monkeypatch):
+    requested_digest = oras.oci.RegisteredDigestAlgorithm.SHA256.digest_for_bytes(
+        MANIFEST_CONTENT
+    )
+    canonical_digest = oras.oci.RegisteredDigestAlgorithm.SHA512.digest_for_bytes(
+        MANIFEST_CONTENT
+    )
+    client = make_manifest_client(
+        monkeypatch, MANIFEST_CONTENT, canonical_digest.digest
+    )
+
+    manifest = client.get_manifest(f"registry.example/repository@{requested_digest}")
+    assert manifest == json.loads(MANIFEST_CONTENT)
+
+
+@pytest.mark.parametrize(
+    "digest_header",
+    ["sha256:not!hex", f"sha384:{'a' * 96}"],
+)
+def test_get_manifest_rejects_invalid_digest_header(monkeypatch, digest_header):
+    client = make_manifest_client(monkeypatch, MANIFEST_CONTENT, digest_header)
+
+    with pytest.raises(ValueError):
+        client.get_manifest("registry.example/repository:tag")
 
 
 @pytest.mark.parametrize("algorithm", ["sha256", "sha512"])

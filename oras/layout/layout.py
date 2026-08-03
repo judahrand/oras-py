@@ -367,16 +367,21 @@ class Layout:
                 continue
 
             logger.debug(f"Fetching sub-manifest: {sub_digest}")
+            sub_size = sub_manifest_ref["size"]
             sub_media_type = sub_manifest_ref.get(
                 "mediaType", oras.defaults.default_manifest_media_type
             )
-            headers = {"Accept": sub_media_type}
-            sub_url = f"{provider.prefix}://{container.registry}/v2/{container.api_prefix}/manifests/{sub_digest}"
-            response = provider.do_request(sub_url, "GET", headers=headers)
-            provider._check_200_response(response)
+            response, verified_digest = provider._get_manifest_response(
+                container,
+                allowed_media_type=[sub_media_type],
+                reference=sub_digest,
+                expected_digest=sub_digest,
+                expected_size=sub_size,
+            )
 
             sub_bytes = response.content
             sub_data = json.loads(sub_bytes)
+            sub_digest = str(verified_digest)
             # the Index might have defaulted, so we overwrite with the actual content response
             sub_media_type = sub_data.get("mediaType", "")
 
@@ -553,21 +558,14 @@ class Layout:
         blobs_dir = layout_dir / oras.defaults.oci_blobs_dir / "sha256"
         blobs_dir.mkdir(parents=True, exist_ok=True)
 
-        headers = {
-            "Accept": ", ".join(oras.defaults.default_manifest_accepted_media_types)
-        }
-        manifest_url = f"{provider.prefix}://{container.manifest_url()}"
-        response = provider.do_request(manifest_url, "GET", headers=headers)
-        provider._check_200_response(response)
+        response, verified_digest = provider._get_manifest_response(
+            container,
+            allowed_media_type=oras.defaults.default_manifest_accepted_media_types,
+            expected_digest=container.digest,
+        )
 
         manifest_bytes = response.content
-        manifest_digest = response.headers.get(
-            "Docker-Content-Digest", container.digest
-        )
-        if not manifest_digest:
-            raise RuntimeError(
-                "Expected to find Docker-Content-Digest header in manifest response."
-            )
+        manifest_digest = str(verified_digest)
         manifest_data = json.loads(manifest_bytes)
         media_type = manifest_data.get("mediaType", "")
 
