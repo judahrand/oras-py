@@ -485,28 +485,6 @@ class Registry:
         )
         return self.upload_blob(blob, container, layer, do_chunked)
 
-    @staticmethod
-    def _validate_blob(
-        path: str,
-        digest: oras.oci.Digest,
-        size: Optional[int] = None,
-    ) -> None:
-        """Validate a downloaded blob's digest and optionally size."""
-        if size is not None:
-            actual_size = os.path.getsize(path)
-            if actual_size != size:
-                raise ValueError(
-                    f"Downloaded blob size mismatch for {digest}: expected "
-                    f"{size} bytes, got {actual_size} bytes."
-                )
-
-        actual_digest = digest.algorithm.digest_for_path(path)
-        if digest != actual_digest:
-            raise ValueError(
-                f"Downloaded blob digest mismatch: expected {digest!s}, got "
-                f"{actual_digest!s}."
-            )
-
     @decorator.ensure_container
     def download_blob(
         self,
@@ -523,6 +501,10 @@ class Registry:
         :param container:  parsed container URI
         :type container: oras.container.Container or str
         """
+        digest_obj = oras.oci.Digest(digest)
+        hasher = digest_obj.algorithm.hasher()
+        blob_size = 0
+        staged = oras.utils.get_tmpfile()
         try:
             # Ensure output directory exists first
             outdir = os.path.dirname(outfile)
@@ -530,22 +512,44 @@ class Registry:
                 oras.utils.mkdir_p(outdir)
             with self.get_blob(container, digest, stream=True) as r:
                 r.raise_for_status()
-                with open(outfile, "wb") as f:
+                with open(staged, "wb") as f:
                     for chunk in r.iter_content(chunk_size=8192):
                         if chunk:
+                            blob_size += len(chunk)
+                            if size is not None and blob_size > size:
+                                raise ValueError(
+                                    "Downloaded blob size larger than expected."
+                                )
+                            hasher.update(chunk)
                             f.write(chunk)
+
+            blob_digest = oras.oci.Digest(
+                f"{digest_obj.algorithm.value}:{hasher.hexdigest()}"
+            )
+            if size is not None and size != blob_size:
+                raise ValueError(
+                    f"Downloaded blob size mismatch for {digest}: expected "
+                    f"{size} bytes, got {blob_size} bytes."
+                )
+
+            if digest_obj != blob_digest:
+                raise ValueError(
+                    f"Downloaded blob digest mismatch: expected {digest!s}, got "
+                    f"{blob_digest!s}."
+                )
+
+            os.replace(staged, outfile)
 
         # Allow an empty layer to fail and return /dev/null
         except Exception as e:
             if digest == oras.defaults.blank_hash:
                 return os.devnull
             raise e
-
-        try:
-            self._validate_blob(outfile, oras.oci.Digest(digest), size)
-        except Exception:
-            os.remove(outfile)
-            raise
+        finally:
+            try:
+                os.remove(staged)
+            except FileNotFoundError:
+                pass
 
         return outfile
 

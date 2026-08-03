@@ -12,6 +12,7 @@ import requests
 
 import oras.client
 import oras.defaults
+import oras.oci
 import oras.provider
 import oras.utils
 
@@ -43,7 +44,7 @@ def make_pull_client(monkeypatch, layer, content):
 def test_digest_string_round_trip():
     original = f"sha256:{hashlib.sha256(b'content').hexdigest()}"
 
-    assert str(oras.provider.Digest(original)) == original
+    assert str(oras.oci.Digest(original)) == original
 
 
 @pytest.mark.parametrize("algorithm", ["sha256", "sha512"])
