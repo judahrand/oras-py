@@ -3,6 +3,7 @@ __copyright__ = "Copyright The ORAS Authors."
 __license__ = "Apache-2.0"
 
 import copy
+import json
 import os
 import sys
 import urllib
@@ -979,24 +980,24 @@ class Registry:
         :param validation_schema: optional json schema to validate the manifest against
         :type validation_schema: dict
         """
-        response, _ = self._get_manifest_response(
+        manifest_bytes, _ = self._get_manifest_bytes(
             container,
             allowed_media_type=allowed_media_type,
             expected_digest=container.digest,  # type: ignore
         )
-        manifest = response.json()
+        manifest = json.loads(manifest_bytes)
         if validation_schema:
             jsonschema.validate(manifest, schema=validation_schema)
         return manifest
 
-    def _get_manifest_response(
+    def _get_manifest_bytes(
         self,
         container: oras.container.Container,
         allowed_media_type: Optional[list] = None,
         reference: Optional[str] = None,
         expected_digest: Optional[str] = None,
         expected_size: Optional[int] = None,
-    ) -> Tuple[requests.Response, oras.oci.Digest]:
+    ) -> Tuple[bytes, oras.oci.Digest]:
         """Fetch a manifest and verify all available integrity assertions."""
         # Load authentication configs for the container's registry. This also makes
         # the helper safe for callers such as the OCI-layout implementation.
@@ -1010,11 +1011,11 @@ class Registry:
         response = self.do_request(get_manifest, "GET", headers=headers)
         self._check_200_response(response)
 
-        content = response.content
-        if expected_size is not None and len(content) != expected_size:
+        manifest_bytes = response.content
+        if expected_size is not None and len(manifest_bytes) != expected_size:
             raise ValueError(
                 "Downloaded manifest size mismatch: expected "
-                f"{expected_size} bytes, got {len(content)} bytes."
+                f"{expected_size} bytes, got {len(manifest_bytes)} bytes."
             )
 
         requested_digest = oras.oci.Digest(expected_digest) if expected_digest else None
@@ -1024,7 +1025,7 @@ class Registry:
         )
         if header_digest:
             # A supplied canonical digest must match the received manifest.
-            actual = header_digest.algorithm.digest_for_bytes(content)
+            actual = header_digest.algorithm.digest_for_bytes(manifest_bytes)
             if header_digest != actual:
                 raise ValueError(
                     f"Downloaded manifest digest mismatch: expected {header_digest!s}, "
@@ -1033,7 +1034,7 @@ class Registry:
 
         # Verify that the data we've received matches what we asked for.
         if requested_digest:
-            actual = requested_digest.algorithm.digest_for_bytes(content)
+            actual = requested_digest.algorithm.digest_for_bytes(manifest_bytes)
             if requested_digest != actual:
                 raise ValueError(
                     f"Downloaded manifest digest mismatch: expected {requested_digest!s}, "
@@ -1045,9 +1046,11 @@ class Registry:
         manifest_digest = (
             requested_digest
             or header_digest
-            or oras.oci.RegisteredDigestAlgorithm.SHA256.digest_for_bytes(content)
+            or oras.oci.RegisteredDigestAlgorithm.SHA256.digest_for_bytes(
+                manifest_bytes
+            )
         )
-        return response, manifest_digest
+        return manifest_bytes, manifest_digest
 
     @decorator.retry()
     def do_request(

@@ -371,7 +371,7 @@ class Layout:
             sub_media_type = sub_manifest_ref.get(
                 "mediaType", oras.defaults.default_manifest_media_type
             )
-            response, verified_digest = provider._get_manifest_response(
+            sub_bytes, verified_digest = provider._get_manifest_bytes(
                 container,
                 allowed_media_type=[sub_media_type],
                 reference=sub_digest,
@@ -379,7 +379,6 @@ class Layout:
                 expected_size=sub_size,
             )
 
-            sub_bytes = response.content
             sub_data = json.loads(sub_bytes)
             sub_digest = str(verified_digest)
             # the Index might have defaulted, so we overwrite with the actual content response
@@ -558,13 +557,12 @@ class Layout:
         blobs_dir = layout_dir / oras.defaults.oci_blobs_dir / "sha256"
         blobs_dir.mkdir(parents=True, exist_ok=True)
 
-        response, verified_digest = provider._get_manifest_response(
+        manifest_bytes, verified_digest = provider._get_manifest_bytes(
             container,
             allowed_media_type=oras.defaults.default_manifest_accepted_media_types,
             expected_digest=container.digest,
         )
 
-        manifest_bytes = response.content
         manifest_digest = str(verified_digest)
         manifest_data = json.loads(manifest_bytes)
         media_type = manifest_data.get("mediaType", "")
