@@ -62,10 +62,34 @@ def make_manifest_client(monkeypatch, content, digest_header):
     return client
 
 
-def test_digest_string_round_trip():
-    original = f"sha256:{hashlib.sha256(b'content').hexdigest()}"
+@pytest.mark.parametrize("algorithm", ["sha256", "sha512"])
+def test_digest_string_round_trip(algorithm):
+    original = f"{algorithm}:{hashlib.new(algorithm, b'content').hexdigest()}"
 
     assert str(oras.oci.Digest(original)) == original
+
+
+@pytest.mark.parametrize(
+    ("algorithm", "encoded"),
+    [
+        ("sha256", "A" * 64),
+        ("sha256", "g" * 64),
+        ("sha256", "G" * 64),
+        ("sha256", "_" * 64),
+        ("sha512", "=" * 128),
+    ],
+)
+def test_digest_rejects_non_lowercase_hexadecimal_encoding(algorithm, encoded):
+    expected_length = hashlib.new(algorithm).digest_size * 2
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            f"Invalid {algorithm} digest encoding: expected {expected_length} "
+            "lowercase hexadecimal characters"
+        ),
+    ):
+        oras.oci.Digest(f"{algorithm}:{encoded}")
 
 
 def test_get_manifest_verifies_digest_header(monkeypatch):
@@ -172,7 +196,7 @@ def test_download_blob_validates_empty_blob(monkeypatch, tmp_path):
     monkeypatch.setattr(client, "get_blob", lambda *args, **kwargs: response)
     staged = tmp_path / "staged"
     staged.touch()
-    monkeypatch.setattr(oras.utils, "get_tmpfile", lambda: str(staged))
+    monkeypatch.setattr(oras.utils, "get_tmpfile", lambda **kwargs: str(staged))
     outfile = tmp_path / "empty"
 
     result = client.download_blob(
@@ -263,6 +287,7 @@ def test_pull_validates_directory_before_extraction(monkeypatch, tmp_path):
         ("sha256+b64u:YWJj", "Unsupported OCI digest algorithm"),
         (f"sha384:{'a' * 96}", "Unsupported OCI digest algorithm"),
         (f"sha256:{'a' * 63}", "Invalid sha256 digest encoding"),
+        (f"sha256:{'G' * 64}", "Invalid sha256 digest encoding"),
         ("sha256:not!hex", "Invalid OCI digest"),
         ("sha256:", "Invalid OCI digest"),
         (f"SHA256:{'a' * 64}", "Invalid OCI digest"),

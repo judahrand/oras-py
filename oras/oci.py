@@ -20,6 +20,7 @@ import oras.utils
 _DIGEST_PATTERN = re.compile(
     r"^(?P<algorithm>[a-z0-9]+(?:[+._-][a-z0-9]+)*):" r"(?P<encoded>[a-zA-Z0-9=_-]+)$"
 )
+_HEX_DIGEST_PATTERN = re.compile(r"[a-f0-9]+")
 
 
 EmptyManifest = {
@@ -235,7 +236,10 @@ class Digest:
 
         encoded = match.group("encoded")
         expected_length = registered_algorithm.hash_size * 2
-        if len(encoded) != expected_length:
+        if (
+            len(encoded) != expected_length
+            or _HEX_DIGEST_PATTERN.fullmatch(encoded) is None
+        ):
             raise ValueError(
                 f"Invalid {algorithm} digest encoding: expected {expected_length} "
                 "lowercase hexadecimal characters."
