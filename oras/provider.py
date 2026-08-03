@@ -539,12 +539,6 @@ class Registry:
                 )
 
             os.replace(staged, outfile)
-
-        # Allow an empty layer to fail and return /dev/null
-        except Exception as e:
-            if digest == oras.defaults.blank_hash:
-                return os.devnull
-            raise e
         finally:
             try:
                 os.remove(staged)

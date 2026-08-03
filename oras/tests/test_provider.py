@@ -163,6 +163,30 @@ def test_pull_validates_registered_digest(monkeypatch, tmp_path, algorithm):
     assert outfile.read_bytes() == content
 
 
+def test_download_blob_validates_empty_blob(monkeypatch, tmp_path):
+    client = oras.provider.Registry(insecure=True)
+    response = requests.Response()
+    response.status_code = 200
+    response._content = b""
+    response._content_consumed = True
+    monkeypatch.setattr(client, "get_blob", lambda *args, **kwargs: response)
+    staged = tmp_path / "staged"
+    staged.touch()
+    monkeypatch.setattr(oras.utils, "get_tmpfile", lambda: str(staged))
+    outfile = tmp_path / "empty"
+
+    result = client.download_blob(
+        "registry.example/repository:tag",
+        oras.defaults.blank_hash,
+        str(outfile),
+        size=0,
+    )
+
+    assert result == str(outfile)
+    assert outfile.read_bytes() == b""
+    assert not staged.exists()
+
+
 def test_pull_rejects_digest_mismatch_without_replacing_file(monkeypatch, tmp_path):
     expected_content = b"expected content"
     downloaded_content = b"corrupt! content"
