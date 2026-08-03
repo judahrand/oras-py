@@ -1003,7 +1003,7 @@ class Registry:
         expected_digest: Optional[str] = None,
         expected_size: Optional[int] = None,
     ) -> Tuple[requests.Response, oras.oci.Digest]:
-        """Fetch and verify a manifest before it is parsed or consumed."""
+        """Fetch a manifest and verify all available integrity assertions."""
         # Load authentication configs for the container's registry. This also makes
         # the helper safe for callers such as the OCI-layout implementation.
         self.auth.load_configs(container)
@@ -1025,17 +1025,17 @@ class Registry:
 
         requested_digest = oras.oci.Digest(expected_digest) if expected_digest else None
         header_value = response.headers.get("Docker-Content-Digest")
-        if not header_value:
-            raise ValueError("Expected to find Docker-Content-Digest header.")
-
-        header_digest = oras.oci.Digest(header_value)
-        # Verify that the digest in the header matches what we received.
-        actual = header_digest.algorithm.digest_for_bytes(content)
-        if header_digest != actual:
-            raise ValueError(
-                f"Downloaded manifest digest mismatch: expected {header_digest!s}, "
-                f"got {actual!s}."
-            )
+        header_digest = (
+            oras.oci.Digest(header_value) if header_value is not None else None
+        )
+        if header_digest:
+            # A supplied canonical digest must match the received manifest.
+            actual = header_digest.algorithm.digest_for_bytes(content)
+            if header_digest != actual:
+                raise ValueError(
+                    f"Downloaded manifest digest mismatch: expected {header_digest!s}, "
+                    f"got {actual!s}."
+                )
 
         # Verify that the data we've received matches what we asked for.
         if requested_digest:
@@ -1046,8 +1046,14 @@ class Registry:
                     f"got {actual!s}."
                 )
 
-        # Prefer the requested digest and fallback to the registry's canonical digest.
-        return response, requested_digest or header_digest
+        # Preserve an addressing digest when one was supplied. For a headerless tag,
+        # calculate a stable local content address from the raw response bytes.
+        manifest_digest = (
+            requested_digest
+            or header_digest
+            or oras.oci.RegisteredDigestAlgorithm.SHA256.digest_for_bytes(content)
+        )
+        return response, manifest_digest
 
     @decorator.retry()
     def do_request(

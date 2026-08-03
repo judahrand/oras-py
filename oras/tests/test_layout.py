@@ -86,16 +86,19 @@ def test_pull_layout_rejects_top_level_manifest_digest_mismatch(monkeypatch, tmp
     assert not Layout(str(layout_dir), validate=False).blob_exists(wrong_digest)
 
 
-def test_pull_layout_fails_for_headerless_tag(monkeypatch, tmp_path):
+def test_pull_layout_addresses_headerless_tag_by_sha256(monkeypatch, tmp_path):
     content = manifest_bytes()
     provider = make_layout_provider(monkeypatch, [manifest_response(content, None)])
     layout_dir = tmp_path / "layout"
+    digest = oras.oci.RegisteredDigestAlgorithm.SHA256.digest_for_bytes(content).digest
 
     layout = Layout(str(layout_dir), validate=False)
-    with pytest.raises(
-        ValueError, match="Expected to find Docker-Content-Digest header."
-    ):
-        layout.pull_from_registry(provider, "registry.example/repository:tag")
+    layout.pull_from_registry(provider, "registry.example/repository:tag")
+
+    index = json.loads((layout_dir / "index.json").read_bytes())
+    assert index["manifests"][0]["digest"] == digest
+    assert layout.digest_to_blob_path(digest).read_bytes() == content
+    assert layout.validate()
 
 
 def test_pull_layout_rejects_nested_manifest_digest_mismatch(monkeypatch, tmp_path):
@@ -154,7 +157,9 @@ def test_pull_layout_rejects_nested_manifest_size_mismatch(monkeypatch, tmp_path
         )
 
 
-def test_pull_layout_stores_verified_nested_manifest_bytes(monkeypatch, tmp_path):
+def test_pull_layout_stores_headerless_nested_manifest_by_descriptor_digest(
+    monkeypatch, tmp_path
+):
     sub_content = manifest_bytes()
     sub_digest = oras.oci.RegisteredDigestAlgorithm.SHA256.digest_for_bytes(
         sub_content
@@ -167,7 +172,7 @@ def test_pull_layout_stores_verified_nested_manifest_bytes(monkeypatch, tmp_path
         monkeypatch,
         [
             manifest_response(top_content, top_digest),
-            manifest_response(sub_content, sub_digest),
+            manifest_response(sub_content, None),
         ],
     )
     layout_dir = tmp_path / "layout"
@@ -177,6 +182,35 @@ def test_pull_layout_stores_verified_nested_manifest_bytes(monkeypatch, tmp_path
 
     assert layout.digest_to_blob_path(sub_digest).read_bytes() == sub_content
     assert layout.digest_to_blob_path(top_digest).read_bytes() == top_content
+    assert layout.validate()
+
+
+def test_pull_layout_preserves_nested_descriptor_digest(monkeypatch, tmp_path):
+    sub_content = manifest_bytes()
+    sub_digest = oras.oci.RegisteredDigestAlgorithm.SHA256.digest_for_bytes(
+        sub_content
+    ).digest
+    canonical_digest = oras.oci.RegisteredDigestAlgorithm.SHA512.digest_for_bytes(
+        sub_content
+    ).digest
+    top_content = index_bytes(sub_digest, len(sub_content))
+    top_digest = oras.oci.RegisteredDigestAlgorithm.SHA256.digest_for_bytes(
+        top_content
+    ).digest
+    provider = make_layout_provider(
+        monkeypatch,
+        [
+            manifest_response(top_content, top_digest),
+            manifest_response(sub_content, canonical_digest),
+        ],
+    )
+    layout_dir = tmp_path / "layout"
+
+    layout = Layout(str(layout_dir), validate=False)
+    layout.pull_from_registry(provider, "registry.example/repository:tag")
+
+    assert layout.digest_to_blob_path(sub_digest).read_bytes() == sub_content
+    assert not layout.blob_exists(canonical_digest)
     assert layout.validate()
 
 

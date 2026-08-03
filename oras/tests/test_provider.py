@@ -89,26 +89,30 @@ def test_get_manifest_rejects_digest_header_mismatch(monkeypatch):
         client.get_manifest("registry.example/repository:tag")
 
 
-def test_get_manifest_fails_without_header(monkeypatch):
+def test_get_manifest_verifies_digest_reference_without_header(monkeypatch):
     digest = oras.oci.RegisteredDigestAlgorithm.SHA256.digest_for_bytes(
         MANIFEST_CONTENT
     )
     client = make_manifest_client(monkeypatch, MANIFEST_CONTENT, None)
 
-    with pytest.raises(
-        ValueError, match="Expected to find Docker-Content-Digest header."
-    ):
-        client.get_manifest(f"registry.example/repository@{digest}")
+    manifest = client.get_manifest(f"registry.example/repository@{digest}")
+
+    assert manifest == json.loads(MANIFEST_CONTENT)
+
+
+def test_get_manifest_allows_headerless_tag(monkeypatch):
+    client = make_manifest_client(monkeypatch, MANIFEST_CONTENT, None)
+
+    manifest = client.get_manifest("registry.example/repository:tag")
+
+    assert manifest == json.loads(MANIFEST_CONTENT)
 
 
 def test_get_manifest_rejects_digest_reference_mismatch(monkeypatch):
-    actual_digest = oras.oci.RegisteredDigestAlgorithm.SHA256.digest_for_bytes(
-        MANIFEST_CONTENT
-    ).digest
     expected_digest = oras.oci.RegisteredDigestAlgorithm.SHA256.digest_for_bytes(
         b"different content"
     ).digest
-    client = make_manifest_client(monkeypatch, MANIFEST_CONTENT, actual_digest)
+    client = make_manifest_client(monkeypatch, MANIFEST_CONTENT, None)
 
     with pytest.raises(ValueError, match="Downloaded manifest digest mismatch"):
         client.get_manifest(f"registry.example/repository@{expected_digest}")
@@ -131,7 +135,7 @@ def test_get_manifest_verifies_reference_and_canonical_header(monkeypatch):
 
 @pytest.mark.parametrize(
     "digest_header",
-    ["sha256:not!hex", f"sha384:{'a' * 96}"],
+    ["", "sha256:not!hex", f"sha384:{'a' * 96}"],
 )
 def test_get_manifest_rejects_invalid_digest_header(monkeypatch, digest_header):
     client = make_manifest_client(monkeypatch, MANIFEST_CONTENT, digest_header)
