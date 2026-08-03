@@ -505,10 +505,10 @@ class Registry:
         digest_obj = oras.oci.Digest(digest)
         hasher = digest_obj.algorithm.hasher()
         blob_size = 0
-        staged = oras.utils.get_tmpfile()
+        outdir = os.path.dirname(outfile)
+        staged = oras.utils.get_tmpfile(tmpdir=outdir)
         try:
             # Ensure output directory exists first
-            outdir = os.path.dirname(outfile)
             if outdir and not os.path.exists(outdir):
                 oras.utils.mkdir_p(outdir)
             with self.get_blob(container, digest, stream=True) as r:
